@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>MQTT Dashboard</title>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+      background: #f4f4f4;
+      position: relative;
+    }
+    .container {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+    }
+    .card {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    canvas {
+      max-width: 100%;
+    }
+    .led-btn {
+      padding: 10px 20px;
+      font-size: 1em;
+      margin-top: 10px;
+    }
+    .status-text {
+      font-size: 1em;
+      margin-top: 10px;
+      line-height: 1.5;
+    }
+    #connectionStatus {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      font-size: 0.95em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #statusDot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background-color: red;
+      animation: none;
+    }
+    @keyframes pulse {
+      0% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.4); opacity: 0.6; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .pulse {
+      animation: pulse 1.5s infinite;
+    }
+  </style>
+</head>
+<body>
+
+<h2>Test MQTT Dashboard for demo EEG data</h2>
+
+<div id="connectionStatus">
+  <div id="statusDot"></div>
+  <span id="statusText">Disconnected</span>
+</div>
+
+<div class="container">
+  <div class="card">
+    <h3>Potentiometer Gauge</h3>
+    <canvas id="potGauge" width="300" height="150"></canvas>
+  </div>
+
+  <div class="card">
+    <h3>Potentiometer Graph</h3>
+    <canvas id="potGraph" width="300" height="150"></canvas>
+  </div>
+
+  <div class="card">
+    <h3>LED Control</h3>
+    <button class="led-btn" id="ledToggle">Toggle LED</button>
+    <div>Status: <span id="ledStatus">--</span></div>
+  </div>
+
+  <div class="card" style="grid-column: 1 / -1;">
+    <h3>Button Press Status</h3>
+    <div class="status-text" id="jsonOutput">
+      Waiting for button press...
+    </div>
+  </div>
+</div>
+
+<script>
+  const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+
+  const ledStatusEl = document.getElementById('ledStatus');
+  const jsonEl = document.getElementById('jsonOutput');
+  const ledBtn = document.getElementById('ledToggle');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  let ledState = false;
+
+  // Gauge setup
+  const gaugeCtx = document.getElementById('potGauge').getContext('2d');
+  const gaugeChart = new Chart(gaugeCtx, {
+    type: 'doughnut',
+    data: {
+      labels: ['Potentiometer'],
+      datasets: [{
+        data: [0, 100],
+        backgroundColor: ['#007acc', '#e0e0e0'],
+        borderWidth: 0,
+        circumference: 180,
+        rotation: 270,
+        cutout: '70%'
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        tooltip: { enabled: false }
+      }
+    }
+  });
+
+  function updateGauge(value) {
+    gaugeChart.data.datasets[0].data[0] = value;
+    gaugeChart.data.datasets[0].data[1] = 100 - value;
+    gaugeChart.update();
+  }
+
+  // Line graph setup
+  const graphCtx = document.getElementById('potGraph').getContext('2d');
+  const graphChart = new Chart(graphCtx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Potentiometer (%)',
+        data: [],
+        borderColor: '#007acc',
+        backgroundColor: 'rgba(0,122,204,0.1)',
+        tension: 0.3,
+        pointRadius: 0
+      }]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { display: false },
+        y: { min: 0, max: 100 }
+      },
+      plugins: {
+        legend: { display: false }
+      }
+    }
+  });
+
+  function updateGraph(value) {
+    const now = new Date().toLocaleTimeString();
+    const data = graphChart.data;
+    data.labels.push(now);
+    data.datasets[0].data.push(value);
+    if (data.labels.length > 30) {
+      data.labels.shift();
+      data.datasets[0].data.shift();
+    }
+    graphChart.update();
+  }
+
+  function updateConnectionStatus(connected) {
+    statusDot.style.backgroundColor = connected ? 'green' : 'red';
+    statusDot.className = connected ? 'pulse' : '';
+    statusText.textContent = connected ? 'Connected' : 'Disconnected';
+  }
+
+  client.on('connect', () => {
+    console.log('Connected to MQTT broker');
+    updateConnectionStatus(true);
+    client.subscribe('ttgo/data/pot');
+    client.subscribe('ttgo/state/led');
+    client.subscribe('ttgo/notify');
+  });
+
+  client.on('close', () => updateConnectionStatus(false));
+  client.on('offline', () => updateConnectionStatus(false));
+  client.on('error', () => updateConnectionStatus(false));
+
+  client.on('message', (topic, message) => {
+    const msg = message.toString();
+    if (topic === 'ttgo/data/pot') {
+      const val = parseInt(msg);
+      updateGauge(val);
+      updateGraph(val);
+    } else if (topic === 'ttgo/state/led') {
+      ledState = msg === '1';
+      ledStatusEl.textContent = ledState ? 'ON' : 'OFF';
+    } else if (topic === 'ttgo/notify') {
+      try {
+        const obj = JSON.parse(msg);
+        jsonEl.innerHTML = `
+          <strong>Button Pressed!</strong><br>
+          Potentiometer: <span style="color:#007acc">${obj.pot}%</span><br>
+          Raw ADC Value: <span style="color:#007acc">${obj.raw}</span><br>
+          LED State: <span style="color:${obj.led ? '#28a745' : '#dc3545'}">${obj.led ? 'ON' : 'OFF'}</span><br>
+          Timestamp: <span>${new Date(obj.timestamp * 1000).toLocaleString()}</span>
+        `;
+      } catch (e) {
+        jsonEl.textContent = 'Invalid JSON';
+      }
+    }
+  });
+
+  ledBtn.addEventListener('click', () => {
+    const newState = ledState ? 'OFF' : 'ON';
+    client.publish('ttgo/cmd/led', newState);
+  });
+</script>
+
+</body>
+</html>
